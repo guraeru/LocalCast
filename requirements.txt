@@ -1,0 +1,10 @@
+Flask==2.3.0
+flask-socketio==5.3.0
+flask-cors==4.0.0
+python-socketio==5.8.0
+python-engineio==4.5.0
+Pillow==10.0.0
+numpy==1.24.0
+pyautogui==0.9.53
+opencv-python==4.8.0.76
+python-dotenv==1.0.0
