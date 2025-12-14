@@ -8,3 +8,4 @@ python-dotenv==1.2.1
 mss==10.1.0
 pyaudiowpatch==0.2.12.7
 pywin32==311
+sounddevice==0.5.1
