@@ -43,6 +43,13 @@ function App() {
   const currentSharerIdRef = useRef(null)  // 共有者ID ref
   const clientIdRef = useRef('')           // 自分のID ref
   const audioInitializedRef = useRef(false)  // 初期バッファリング完了フラグ
+  const audioSyncRef = useRef({
+    lastResetTime: 0,           // 最後にリセットした時刻
+    consecutiveDelays: 0,       // 連続遅延カウント
+    targetLatency: 0.08,        // 目標遅延（80ms - 低遅延）
+    maxLatency: 0.15,           // 最大許容遅延（150ms）
+    minLatency: 0.03,           // 最小遅延（30ms）
+  })
 
   // FPS計算用 - useRefで高速化
   const fpsCounterRef = useRef({ count: 0, lastTime: Date.now() })
@@ -139,6 +146,11 @@ function App() {
       setCurrentSharerId(data.sharer_id)
       currentSharerIdRef.current = data.sharer_id  // refも更新
       setCurrentFrame(null)  // 前のフレームをクリア
+      // 音声同期をリセット
+      nextPlayTimeRef.current = 0
+      audioInitializedRef.current = false
+      audioSyncRef.current.consecutiveDelays = 0
+      audioSyncRef.current.lastResetTime = 0
       addMessage(`共有開始: ${data.target || ''}`, 'success')
     })
 
@@ -147,6 +159,10 @@ function App() {
       setCurrentFrame(null)
       setCurrentSharerId(null)
       currentSharerIdRef.current = null  // refもリセット
+      // 音声同期をリセット
+      nextPlayTimeRef.current = 0
+      audioInitializedRef.current = false
+      audioSyncRef.current.consecutiveDelays = 0
       addMessage('共有停止', 'warning')
     })
     
@@ -196,7 +212,7 @@ function App() {
     setMessages(prev => [...prev, { text, type, timestamp }].slice(-50))
   }
 
-  // 音声再生関数（超低遅延・高音質版）
+  // 音声再生関数（リアルタイム同期版 - 配信元に追従）
   const playAudioChunk = useCallback((data) => {
     try {
       // AudioContextが未初期化またはロック解除されていない場合はスキップ
@@ -205,6 +221,8 @@ function App() {
       }
       
       const ctx = audioContextRef.current
+      const sync = audioSyncRef.current
+      const currentTime = ctx.currentTime
       
       // Base64デコード
       const binaryString = atob(data.data)
@@ -240,22 +258,50 @@ function App() {
         }
       }
       
-      // 超低遅延：最小バッファ（50ms）
-      const BUFFER_TIME = 0.05
-      const currentTime = ctx.currentTime
-      
-      // 次の再生時刻を計算
+      // === リアルタイム同期ロジック ===
       let startTime = nextPlayTimeRef.current
+      const bufferDuration = audioBuffer.duration
       
-      // 初回または再生が追いついた場合
-      if (!audioInitializedRef.current || startTime < currentTime) {
-        startTime = currentTime + BUFFER_TIME
+      // 初回再生時
+      if (!audioInitializedRef.current) {
+        startTime = currentTime + sync.targetLatency
         audioInitializedRef.current = true
+        sync.consecutiveDelays = 0
+        console.log('🔊 音声同期開始 - 目標遅延:', sync.targetLatency * 1000, 'ms')
       }
       
-      // 遅延が溜まりすぎた場合はリセット（200ms以上）
-      if (startTime > currentTime + 0.2) {
-        startTime = currentTime + BUFFER_TIME
+      // 現在の遅延を計算
+      const currentLatency = startTime - currentTime
+      
+      // ケース1: 再生が追いついてしまった（バッファアンダーラン）
+      if (currentLatency < sync.minLatency) {
+        // 即座に再生開始（少しバッファを持たせる）
+        startTime = currentTime + sync.targetLatency
+        sync.consecutiveDelays = 0
+      }
+      // ケース2: 遅延が大きすぎる（バッファが溜まっている）
+      else if (currentLatency > sync.maxLatency) {
+        // リアルタイム性を優先：古い音声は捨てて最新に追従
+        startTime = currentTime + sync.targetLatency
+        sync.consecutiveDelays = 0
+        
+        // 頻繁にリセットしすぎないように記録
+        const now = Date.now()
+        if (now - sync.lastResetTime > 1000) {
+          console.log('🔄 音声同期リセット - 遅延:', (currentLatency * 1000).toFixed(0), 'ms → ', (sync.targetLatency * 1000).toFixed(0), 'ms')
+          sync.lastResetTime = now
+        }
+      }
+      // ケース3: 遅延が目標より大きいが許容範囲内
+      else if (currentLatency > sync.targetLatency + 0.02) {
+        // 徐々に追いつく：少しだけ早く再生開始
+        sync.consecutiveDelays++
+        if (sync.consecutiveDelays > 5) {
+          // 5回連続で遅延が大きい場合、少し早めに再生
+          startTime = startTime - 0.005  // 5msずつ追いつく
+        }
+      } else {
+        sync.consecutiveDelays = 0
       }
       
       // 再生
@@ -265,7 +311,7 @@ function App() {
       source.start(startTime)
       
       // 次の再生時刻を更新
-      nextPlayTimeRef.current = startTime + audioBuffer.duration
+      nextPlayTimeRef.current = startTime + bufferDuration
       
     } catch (e) {
       console.error('音声再生エラー:', e)
@@ -336,6 +382,9 @@ function App() {
       nextPlayTimeRef.current = 0
       audioBufferQueueRef.current = []
       audioInitializedRef.current = false
+      // 同期状態もリセット
+      audioSyncRef.current.consecutiveDelays = 0
+      audioSyncRef.current.lastResetTime = 0
     } else {
       // 音声を有効化
       setIsAudioEnabled(true)
@@ -344,10 +393,12 @@ function App() {
       // AudioContextを事前に初期化（ユーザーインタラクション中に行う必要がある）
       if (!audioContextRef.current) {
         audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)({
-          sampleRate: 44100
+          sampleRate: 44100,
+          latencyHint: 'interactive'  // 低遅延モード
         })
         nextPlayTimeRef.current = 0
         audioInitializedRef.current = false
+        audioSyncRef.current.consecutiveDelays = 0
         console.log('🔊 AudioContext初期化')
       }
       if (audioContextRef.current.state === 'suspended') {
