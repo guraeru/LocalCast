@@ -25,6 +25,9 @@ const ScreenView = memo(function ScreenView({
       alpha: false,
       desynchronized: true  // 低レイテンシモード
     })
+    
+    // テキストを鮮明に表示するための設定
+    ctx.imageSmoothingEnabled = false
 
     // 毎回新しいImageオブジェクトを作成（確実に描画するため）
     const img = new Image()

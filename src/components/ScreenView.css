@@ -63,7 +63,9 @@
   max-height: 100%;
   object-fit: contain;
   display: block;
-  image-rendering: auto;
+  /* テキストを鮮明に表示（ぼやけ防止）*/
+  image-rendering: -webkit-optimize-contrast;
+  image-rendering: crisp-edges;
 }
 
 .fullscreen-canvas {
@@ -71,7 +73,9 @@
   height: 100vh;
   object-fit: contain;
   display: block;
-  image-rendering: auto;
+  /* テキストを鮮明に表示（ぼやけ防止）*/
+  image-rendering: -webkit-optimize-contrast;
+  image-rendering: crisp-edges;
 }
 
 /* 情報オーバーレイ */

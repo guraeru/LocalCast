@@ -137,11 +137,11 @@ JPEG_QUALITY = 95
 RESOLUTION_LIMIT = 'fullhd'  # 'hd', 'fullhd', '4k'
 USE_ADAPTIVE = False
 
-# シンプルな3つのプリセット（高画質設定）
+# プリセット（高画質維持、差分検出で帯域節約）
 QUALITY_PRESETS = {
-    'hd60': {'quality': 95, 'resolution': 'fullhd', 'fps': 60},   # HD 60fps (実際はFull HD)
-    '4k30': {'quality': 98, 'resolution': '4k', 'fps': 30},       # 4K 30fps
-    '4k60': {'quality': 95, 'resolution': '4k', 'fps': 60},       # 4K 60fps
+    'hd60': {'quality': 95, 'resolution': 'fullhd', 'fps': 60},   # Full HD 60fps
+    '4k30': {'quality': 95, 'resolution': '4k', 'fps': 30},       # 4K 30fps
+    '4k60': {'quality': 92, 'resolution': '4k', 'fps': 60},       # 4K 60fps
 }
 
 # NVENCステータス

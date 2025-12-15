@@ -444,7 +444,7 @@ class ScreenCapture:
             return None
     
     def _resize_to_limit(self, img: np.ndarray) -> np.ndarray:
-        """解像度上限に合わせてリサイズ"""
+        """解像度上限に合わせてリサイズ（テキスト品質優先）"""
         h, w = img.shape[:2]
         
         if w <= self.max_width and h <= self.max_height:
@@ -457,7 +457,8 @@ class ScreenCapture:
         new_w = int(w * scale)
         new_h = int(h * scale)
         
-        resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        # INTER_LANCZOS4: 高品質リサイズ（テキストの鮮明さを維持）
+        resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
         return resized
     
     def get_stats(self) -> FrameStats:
