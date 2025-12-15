@@ -341,9 +341,12 @@ class ScreenCapture:
                 
                 quality = self.quality_controller.current_quality if self.use_adaptive else self.jpeg_quality
                 
+                # 高画質エンコード設定
+                # JPEG_SAMPLING_FACTOR: 0x111111 = 4:4:4 (最高画質、色情報を間引かない)
                 encode_params = [
                     cv2.IMWRITE_JPEG_QUALITY, quality,
-                    cv2.IMWRITE_JPEG_OPTIMIZE, 0,
+                    cv2.IMWRITE_JPEG_OPTIMIZE, 1,
+                    cv2.IMWRITE_JPEG_SAMPLING_FACTOR, 0x111111,  # 4:4:4 サブサンプリング
                 ]
                 success, buffer = cv2.imencode('.jpg', img, encode_params)
                 

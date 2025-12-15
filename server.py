@@ -132,15 +132,15 @@ selected_window_title = None
 
 # キャプチャ設定
 TARGET_FPS = 60
-JPEG_QUALITY = 90
+JPEG_QUALITY = 95
 RESOLUTION_LIMIT = 'fullhd'  # 'hd', 'fullhd', '4k'
 USE_ADAPTIVE = False
 
-# シンプルな3つのプリセット
+# シンプルな3つのプリセット（高画質設定）
 QUALITY_PRESETS = {
-    'hd60': {'quality': 90, 'resolution': 'fullhd', 'fps': 60},   # HD 60fps (実際はFull HD)
-    '4k30': {'quality': 95, 'resolution': '4k', 'fps': 30},       # 4K 30fps
-    '4k60': {'quality': 90, 'resolution': '4k', 'fps': 60},       # 4K 60fps
+    'hd60': {'quality': 95, 'resolution': 'fullhd', 'fps': 60},   # HD 60fps (実際はFull HD)
+    '4k30': {'quality': 98, 'resolution': '4k', 'fps': 30},       # 4K 30fps
+    '4k60': {'quality': 95, 'resolution': '4k', 'fps': 60},       # 4K 60fps
 }
 
 # NVENCステータス
