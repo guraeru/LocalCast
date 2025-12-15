@@ -34,6 +34,7 @@ function App() {
   // 音声共有
   const [isAudioEnabled, setIsAudioEnabled] = useState(true)
   const [audioAvailable, setAudioAvailable] = useState(false)
+  const [audioUnlocked, setAudioUnlocked] = useState(false)  // ユーザーが音声を有効化したか
   const audioContextRef = useRef(null)
   const nextPlayTimeRef = useRef(0)  // 次の再生開始時刻
   const audioBufferQueueRef = useRef([])  // バッファキュー
@@ -198,22 +199,12 @@ function App() {
   // 音声再生関数（超低遅延・高音質版）
   const playAudioChunk = useCallback((data) => {
     try {
-      // AudioContextを遅延初期化
-      if (!audioContextRef.current) {
-        audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)({
-          sampleRate: data.sampleRate || 44100,
-          latencyHint: 'interactive'  // 低遅延モード
-        })
-        nextPlayTimeRef.current = 0
-        audioBufferQueueRef.current = []
-        audioInitializedRef.current = false
-        console.log('🔊 AudioContext作成（低遅延モード）')
+      // AudioContextが未初期化またはロック解除されていない場合はスキップ
+      if (!audioContextRef.current || audioContextRef.current.state !== 'running') {
+        return
       }
       
       const ctx = audioContextRef.current
-      if (ctx.state === 'suspended') {
-        ctx.resume()
-      }
       
       // Base64デコード
       const binaryString = atob(data.data)
@@ -285,6 +276,44 @@ function App() {
   useEffect(() => {
     playAudioChunkRef.current = playAudioChunk
   }, [playAudioChunk])
+
+  // 音声をロック解除（ユーザーインタラクション時に呼び出す）
+  const unlockAudio = useCallback(() => {
+    console.log('🔓 音声ロック解除試行')
+    
+    try {
+      // AudioContextを作成
+      if (!audioContextRef.current) {
+        audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)({
+          sampleRate: 44100,
+          latencyHint: 'interactive'
+        })
+        nextPlayTimeRef.current = 0
+        audioBufferQueueRef.current = []
+        audioInitializedRef.current = false
+        console.log('🔊 AudioContext作成')
+      }
+      
+      const ctx = audioContextRef.current
+      
+      // suspendedならresume
+      if (ctx.state === 'suspended') {
+        ctx.resume().then(() => {
+          console.log('🔊 AudioContext再開成功 - 状態:', ctx.state)
+          if (ctx.state === 'running') {
+            setAudioUnlocked(true)
+          }
+        }).catch(e => {
+          console.error('🔊 AudioContext再開失敗:', e)
+        })
+      } else if (ctx.state === 'running') {
+        setAudioUnlocked(true)
+        console.log('🔊 AudioContext既に実行中')
+      }
+    } catch (e) {
+      console.error('AudioContextエラー:', e)
+    }
+  }, [])
 
   // 音声共有のトグル
   const toggleAudio = useCallback(() => {
@@ -419,6 +448,11 @@ function App() {
           isFullscreen={isFullscreen}
           onToggleFullscreen={toggleFullscreen}
           selectedSource={selectedSource}
+          audioUnlocked={audioUnlocked}
+          onUnlockAudio={unlockAudio}
+          isHost={isHost}
+          currentSharerId={currentSharerId}
+          clientId={clientId}
         />
         {!isFullscreen && (
           <ControlPanel

@@ -181,3 +181,65 @@
 .exit-fullscreen-btn:hover {
   background: rgba(255, 255, 255, 0.2);
 }
+
+/* 音声有効化オーバーレイ */
+.audio-unlock-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.85);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  cursor: pointer;
+  z-index: 100;
+  animation: fadeIn 0.3s ease-out;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.audio-unlock-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  color: white;
+  text-align: center;
+  padding: 40px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  transition: transform 0.2s, background 0.2s;
+}
+
+.audio-unlock-overlay:hover .audio-unlock-content {
+  transform: scale(1.05);
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.audio-unlock-content svg {
+  color: #4caf50;
+  animation: pulse-audio 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse-audio {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.1); opacity: 0.8; }
+}
+
+.audio-unlock-content p {
+  font-size: 20px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.audio-unlock-content small {
+  font-size: 14px;
+  opacity: 0.7;
+}

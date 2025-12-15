@@ -1,5 +1,5 @@
 import { useRef, useEffect, useCallback, memo } from 'react'
-import { Monitor, Loader2, Activity, X } from 'lucide-react'
+import { Monitor, Loader2, Activity, X, Volume2 } from 'lucide-react'
 import './ScreenView.css'
 
 // 高速Canvas描画コンポーネント
@@ -11,10 +11,18 @@ const ScreenView = memo(function ScreenView({
   frameInfo, 
   isFullscreen,
   onToggleFullscreen,
-  selectedSource
+  selectedSource,
+  audioUnlocked,
+  onUnlockAudio,
+  isHost,
+  currentSharerId,
+  clientId
 }) {
   const canvasRef = useRef(null)
   const frameRequestRef = useRef(null)
+  
+  // 自分が配信者かどうか
+  const isSharer = currentSharerId && currentSharerId === clientId
 
   // 画像を非同期でデコードしてCanvasに描画
   const renderFrame = useCallback((frameData) => {
@@ -138,6 +146,17 @@ const ScreenView = memo(function ScreenView({
               <X size={24} />
               <span>ESCで終了</span>
             </button>
+          )}
+
+          {/* 音声有効化オーバーレイ（配信者以外のクライアントに表示） */}
+          {!audioUnlocked && !isSharer && (
+            <div className="audio-unlock-overlay" onClick={onUnlockAudio}>
+              <div className="audio-unlock-content">
+                <Volume2 size={48} />
+                <p>クリックして音声を有効化</p>
+                <small>ブラウザのポリシーにより、操作が必要です</small>
+              </div>
+            </div>
           )}
         </div>
       )}
