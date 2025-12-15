@@ -496,6 +496,21 @@ class ScreenCapture:
 # ユーティリティ
 # ========================================
 
+def get_ffmpeg_path() -> str:
+    """FFmpegのパスを取得（imageio-ffmpegを優先）"""
+    # まずimageio-ffmpegから取得を試みる
+    try:
+        import imageio_ffmpeg
+        ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+        if ffmpeg_path:
+            return ffmpeg_path
+    except ImportError:
+        pass
+    
+    # フォールバック: システムのffmpeg
+    return 'ffmpeg'
+
+
 def check_nvenc_available() -> dict:
     """NVENC確認"""
     import subprocess
@@ -506,13 +521,15 @@ def check_nvenc_available() -> dict:
         'av1_nvenc': False
     }
     
+    ffmpeg_path = get_ffmpeg_path()
+    
     try:
-        proc = subprocess.run(['ffmpeg', '-version'],
+        proc = subprocess.run([ffmpeg_path, '-version'],
                             capture_output=True, timeout=5)
         result['ffmpeg'] = proc.returncode == 0
         
         if result['ffmpeg']:
-            proc = subprocess.run(['ffmpeg', '-hide_banner', '-encoders'],
+            proc = subprocess.run([ffmpeg_path, '-hide_banner', '-encoders'],
                                 capture_output=True, text=True, timeout=5)
             output = proc.stdout
             result['h264_nvenc'] = 'h264_nvenc' in output
