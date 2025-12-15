@@ -87,7 +87,8 @@ is_sharing = False
 is_audio_sharing = False
 capture_pipeline = None  # HighPerformanceCapture インスタンス
 audio_thread = None
-connected_clients = set()
+connected_clients = set()  # session ID
+connected_ips = {}  # IP -> set of session IDs (1PCを1人としてカウント)
 capture_lock = threading.Lock()
 
 # サーバーのIPアドレス（ホスト判定用）
@@ -424,15 +425,20 @@ def serve_static(path):
 @socketio.on('connect')
 def handle_connect():
     """クライアント接続時"""
+    client_ip = request.remote_addr
+    
     with capture_lock:
         connected_clients.add(request.sid)
-        client_count = len(connected_clients)
+        # IPベースでカウント（1PCを1人として）
+        if client_ip not in connected_ips:
+            connected_ips[client_ip] = set()
+        connected_ips[client_ip].add(request.sid)
+        client_count = len(connected_ips)  # ユニークIP数
 
     # ホスト（サーバーと同じマシン）かどうか判定
-    client_ip = request.remote_addr
     is_host = client_ip in SERVER_IPS
     
-    print(f"[接続] ✅ クライアント接続: {request.sid[:8]}... (IP: {client_ip}, ホスト: {is_host})")
+    print(f"[接続] ✅ クライアント接続: {request.sid[:8]}... (IP: {client_ip}, ホスト: {is_host}, 接続PC数: {client_count})")
 
     emit('connected', {
         'client_id': request.sid,
@@ -450,19 +456,26 @@ def handle_connect():
         }
     })
 
+    # 他のクライアントにも人数更新を通知
     socketio.emit('client_count_updated', {'count': client_count})
 
 
 @socketio.on('disconnect')
-def handle_disconnect():
+def handle_disconnect(reason=None):
     """クライアント切断時"""
     global current_sharer_id
+    client_ip = request.remote_addr
     
     with capture_lock:
         connected_clients.discard(request.sid)
-        client_count = len(connected_clients)
+        # IPベースでカウント
+        if client_ip in connected_ips:
+            connected_ips[client_ip].discard(request.sid)
+            if not connected_ips[client_ip]:  # そのIPからの接続が0になった
+                del connected_ips[client_ip]
+        client_count = len(connected_ips)  # ユニークIP数
 
-    print(f"[切断] ❌ クライアント切断: {request.sid[:8]}...")
+    print(f"[切断] ❌ クライアント切断: {request.sid[:8]}... (IP: {client_ip}, 残りPC数: {client_count})")
 
     # 画面共有者が切断した場合、共有を停止
     if request.sid == current_sharer_id:
@@ -470,6 +483,7 @@ def handle_disconnect():
         current_sharer_id = None
         stop_sharing()
 
+    # 全クライアントに人数更新を通知
     socketio.emit('client_count_updated', {'count': client_count})
 
 
