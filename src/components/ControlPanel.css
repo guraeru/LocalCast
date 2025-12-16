@@ -208,6 +208,16 @@
   color: #333;
 }
 
+/* コーデック・エンコーダー表示 */
+.stat-value.codec-h264 {
+  color: #2e7d32;
+}
+
+.stat-value.encoder-nvenc {
+  color: #76b900;
+  font-weight: 800;
+}
+
 /* メッセージ */
 .message-box {
   background: white;

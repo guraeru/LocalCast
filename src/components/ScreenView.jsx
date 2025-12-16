@@ -1,8 +1,9 @@
-import { useRef, useEffect, useCallback, memo } from 'react'
+import { useRef, useEffect, memo, useState } from 'react'
 import { Monitor, Loader2, Activity, X, Volume2 } from 'lucide-react'
+import JMuxer from 'jmuxer'
 import './ScreenView.css'
 
-// 高速Canvas描画コンポーネント
+// H.264画面表示コンポーネント
 const ScreenView = memo(function ScreenView({ 
   currentFrame, 
   isSharing, 
@@ -14,78 +15,80 @@ const ScreenView = memo(function ScreenView({
   selectedSource,
   audioUnlocked,
   onUnlockAudio,
-  isHost,
   currentSharerId,
   clientId
 }) {
-  const canvasRef = useRef(null)
-  const frameRequestRef = useRef(null)
+  const videoRef = useRef(null)
+  const jmuxerRef = useRef(null)
+  const [isH264Ready, setIsH264Ready] = useState(false)
+  const frameCountRef = useRef(0)
   
-  // 自分が配信者かどうか
   const isSharer = currentSharerId && currentSharerId === clientId
 
-  // 画像を非同期でデコードしてCanvasに描画
-  const renderFrame = useCallback((frameData) => {
-    if (!canvasRef.current || !frameData) return
-
-    const canvas = canvasRef.current
-    const ctx = canvas.getContext('2d', { 
-      alpha: false,
-      desynchronized: true  // 低レイテンシモード
-    })
-    
-    // テキストを鮮明に表示するための設定
-    ctx.imageSmoothingEnabled = false
-
-    // 毎回新しいImageオブジェクトを作成（確実に描画するため）
-    const img = new Image()
-    img.onload = function() {
-      // Canvas サイズを画像に合わせる
-      if (canvas.width !== this.width || canvas.height !== this.height) {
-        canvas.width = this.width
-        canvas.height = this.height
-      }
-      // 描画
-      ctx.drawImage(this, 0, 0)
-    }
-    img.src = frameData
-  }, [])
-
-  // フレーム更新時にrequestAnimationFrameで描画
+  // jmuxer初期化（フレーム受信時に遅延初期化）
   useEffect(() => {
-    if (currentFrame) {
-      // 次のフレームで描画
-      frameRequestRef.current = requestAnimationFrame(() => {
-        renderFrame(currentFrame)
-      })
-    }
-
-    return () => {
-      if (frameRequestRef.current) {
-        cancelAnimationFrame(frameRequestRef.current)
+    // 共有中でフレームが来たらjmuxerを初期化
+    if (isSharing && currentFrame && videoRef.current && !jmuxerRef.current) {
+      console.log('🎬 jmuxer初期化開始')
+      try {
+        jmuxerRef.current = new JMuxer({
+          node: videoRef.current,
+          mode: 'video',
+          flushingTime: 0,
+          fps: 60,
+          debug: false,
+          onReady: () => {
+            console.log('✅ jmuxer準備完了')
+            setIsH264Ready(true)
+          },
+          onError: (e) => {
+            console.error('❌ jmuxer エラー:', e)
+          }
+        })
+        setIsH264Ready(true)  // 即座に準備完了とする
+      } catch (e) {
+        console.error('jmuxer初期化エラー:', e)
       }
     }
-  }, [currentFrame, renderFrame])
+  }, [isSharing, currentFrame])
 
-  // 共有状態が変わった時にCanvasをクリア
+  // 共有停止時にクリーンアップ
   useEffect(() => {
     if (!isSharing) {
-      // Canvasをクリア
-      if (canvasRef.current) {
-        const ctx = canvasRef.current.getContext('2d')
-        ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height)
+      if (jmuxerRef.current) {
+        console.log('🧹 jmuxerクリーンアップ')
+        try {
+          jmuxerRef.current.destroy()
+        } catch (e) {}
+        jmuxerRef.current = null
       }
+      setIsH264Ready(false)
+      frameCountRef.current = 0
     }
   }, [isSharing])
 
-  // クリーンアップ
+  // フレーム描画（H.264）
   useEffect(() => {
-    return () => {
-      if (frameRequestRef.current) {
-        cancelAnimationFrame(frameRequestRef.current)
+    if (!currentFrame || !currentFrame.image) return
+    if (!jmuxerRef.current) return
+    
+    try {
+      const binaryString = atob(currentFrame.image)
+      const bytes = new Uint8Array(binaryString.length)
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i)
       }
+      jmuxerRef.current.feed({ video: bytes })
+      
+      // デバッグ: 最初の数フレームだけログ
+      frameCountRef.current++
+      if (frameCountRef.current <= 3) {
+        console.log(`📹 フレーム ${frameCountRef.current}: ${bytes.length} bytes`)
+      }
+    } catch (e) {
+      console.error('H.264フィードエラー:', e)
     }
-  }, [])
+  }, [currentFrame])
 
   return (
     <div className={`screen-area ${isFullscreen ? 'fullscreen-mode' : ''}`}>
@@ -113,9 +116,13 @@ const ScreenView = memo(function ScreenView({
 
       {currentFrame && (
         <div className="screen-frame">
-          <canvas 
-            ref={canvasRef}
-            className={isFullscreen ? 'fullscreen-canvas' : 'normal-canvas'}
+          {/* H.264 Video */}
+          <video 
+            ref={videoRef}
+            className={`${isFullscreen ? 'fullscreen-canvas' : 'normal-canvas'}`}
+            autoPlay
+            muted
+            playsInline
           />
           
           {/* 情報オーバーレイ */}
@@ -134,9 +141,14 @@ const ScreenView = memo(function ScreenView({
               {frameInfo.width}x{frameInfo.height}
             </div>
             {!isFullscreen && (
-              <div className="size-indicator">
-                {(frameInfo.size / 1024).toFixed(0)} KB
-              </div>
+              <>
+                <div className="size-indicator">
+                  {(frameInfo.size / 1024).toFixed(0)} KB
+                </div>
+                <div className="codec-indicator h264">
+                  H.264
+                </div>
+              </>
             )}
           </div>
 
@@ -148,7 +160,7 @@ const ScreenView = memo(function ScreenView({
             </button>
           )}
 
-          {/* 音声有効化オーバーレイ（配信者以外のクライアントに表示） */}
+          {/* 音声有効化オーバーレイ */}
           {!audioUnlocked && !isSharer && (
             <div className="audio-unlock-overlay" onClick={onUnlockAudio}>
               <div className="audio-unlock-content">

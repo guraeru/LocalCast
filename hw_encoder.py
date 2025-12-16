@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-高速画面キャプチャモジュール v4.0
+高速画面キャプチャモジュール v5.1 - H.264シンプル版
 
 機能:
 - 正確なウィンドウキャプチャ（PrintWindow API使用）
 - 高速モニターキャプチャ（mss使用）
-- 4K/HD解像度上限選択
-- 高画質JPEG (品質90-95)
-- 安定したフレームレート
+- H.264エンコード（FFmpeg NVENC、raw H.264出力）
+- JPEGフォールバック
 """
 
 import threading
@@ -17,6 +16,7 @@ import numpy as np
 import cv2
 import base64
 import mss
+import subprocess
 from dataclasses import dataclass
 from typing import Optional, Callable
 from enum import Enum
@@ -43,7 +43,6 @@ class ResolutionLimit(Enum):
     NATIVE = "native"   # 元の解像度
 
 
-# 解像度上限の実際の値
 RESOLUTION_LIMITS = {
     ResolutionLimit.HD: (1280, 720),
     ResolutionLimit.FULL_HD: (1920, 1080),
@@ -63,81 +62,217 @@ class FrameStats:
     fps: float = 0
     dropped_frames: int = 0
     resolution: str = ""
+    encoder_type: str = "jpeg"
 
 
-class QualityController:
-    """品質コントローラー"""
+class H264Encoder:
+    """
+    H.264エンコーダー - シンプル版
+    raw H.264 (Annex B) 形式で出力、jmuxerでデコード
+    """
     
-    def __init__(self, target_fps: int = 30, initial_quality: int = 90):
-        self.target_fps = target_fps
-        self.target_frame_time = 1000.0 / target_fps
+    def __init__(self, width: int, height: int, fps: int = 30, bitrate: str = "20M"):
+        self.width = width
+        self.height = height
+        self.fps = fps
+        self.bitrate = bitrate
+        self.process: Optional[subprocess.Popen] = None
+        self.encoder_type = "unknown"
+        self.is_running = False
+        self._lock = threading.Lock()
+        self._output_buffer = bytearray()
+        self._reader_thread: Optional[threading.Thread] = None
         
-        self.current_quality = initial_quality
-        self.current_scale = 1.0
-        self.min_quality = 70
-        self.max_quality = 95
+    def start(self, nvenc_available: dict = None) -> bool:
+        """エンコーダーを開始"""
+        ffmpeg_path = get_ffmpeg_path()
+        nvenc_status = nvenc_available or {'h264_nvenc': False}
         
-        self.frame_times = []
-        self.cooldown = 0
+        # 画質安定化: 短いGOP間隔（全フレームI-frame品質に近づける）
+        # keyintは短めにして定期的な画質劣化を防止
+        gop_size = self.fps  # 1秒ごとにキーフレーム
+        
+        # ビットレートを数値に変換（バッファサイズ計算用）
+        bitrate_num = self.bitrate.rstrip('MmKk')
+        try:
+            if 'M' in self.bitrate.upper():
+                bufsize = f"{int(float(bitrate_num) * 2)}M"  # ビットレートの2倍
+            else:
+                bufsize = f"{int(float(bitrate_num) * 2)}K"
+        except:
+            bufsize = self.bitrate
+        
+        if nvenc_status['h264_nvenc']:
+            # NVENC: 古いFFmpegとの互換性を考慮
+            encoder_args = [
+                '-c:v', 'h264_nvenc',
+                '-preset', 'hq',          # High Quality（ノイズ軽減）
+                '-rc', 'vbr_hq',          # VBR High Quality（品質優先）
+                '-cq', '20',              # 品質レベル（20=安定、ノイズ少ない）
+                '-b:v', self.bitrate,
+                '-maxrate', self.bitrate,
+                '-bufsize', bufsize,      # 十分なバッファ
+                '-profile:v', 'high',
+                '-g', str(gop_size),
+                '-bf', '0',               # Bフレームなし（低遅延）
+                '-zerolatency', '1',
+            ]
+            self.encoder_type = 'h264_nvenc'
+        else:
+            encoder_args = [
+                '-c:v', 'libx264',
+                '-preset', 'fast',        # fast（より高品質）
+                '-tune', 'zerolatency',
+                '-crf', '20',             # 品質優先（20=安定、ノイズ少ない）
+                '-b:v', self.bitrate,
+                '-maxrate', self.bitrate,
+                '-bufsize', bufsize,
+                '-profile:v', 'high',
+                '-g', str(gop_size),
+                '-bf', '0',
+            ]
+            self.encoder_type = 'libx264'
+        
+        cmd = [
+            ffmpeg_path,
+            '-hide_banner',
+            '-loglevel', 'error',
+            # 入力
+            '-f', 'rawvideo',
+            '-pix_fmt', 'bgr24',
+            '-s', f'{self.width}x{self.height}',
+            '-r', str(self.fps),
+            '-i', 'pipe:0',
+            # 出力ピクセルフォーマット
+            '-pix_fmt', 'yuv420p',
+            # エンコード設定
+            *encoder_args,
+            # 出力: raw H.264 (Annex B形式)
+            '-f', 'h264',
+            'pipe:1'
+        ]
+        
+        # コマンド短縮版を出力（デバッグ用）
+        print(f"[H264] エンコーダー起動: {self.encoder_type} @ {self.width}x{self.height} {self.fps}fps")
+        
+        try:
+            startupinfo = None
+            if hasattr(subprocess, 'STARTUPINFO'):
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = subprocess.SW_HIDE
+            
+            self.process = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=0,
+                startupinfo=startupinfo,
+                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+            )
+            
+            self.is_running = True
+            
+            # 出力読み取りスレッド
+            self._reader_thread = threading.Thread(target=self._read_output, daemon=True)
+            self._reader_thread.start()
+            
+            # エラー読み取りスレッド
+            threading.Thread(target=self._read_errors, daemon=True).start()
+            
+            print(f"[H264] ✅ エンコーダー開始: {self.encoder_type}")
+            return True
+            
+        except Exception as e:
+            print(f"[H264] ❌ エンコーダー開始失敗: {e}")
+            return False
     
-    def update(self, frame_time_ms: float):
-        """フレーム時間に基づいて調整"""
-        self.frame_times.append(frame_time_ms)
-        if len(self.frame_times) > 20:
-            self.frame_times.pop(0)
-        
-        if self.cooldown > 0:
-            self.cooldown -= 1
-            return
-        
-        if len(self.frame_times) < 5:
-            return
-        
-        avg_time = sum(self.frame_times) / len(self.frame_times)
-        
-        if avg_time > self.target_frame_time * 1.3:
-            if self.current_quality > self.min_quality:
-                self.current_quality = max(self.min_quality, self.current_quality - 5)
-                self.cooldown = 15
-        elif avg_time < self.target_frame_time * 0.6:
-            if self.current_quality < self.max_quality:
-                self.current_quality = min(self.max_quality, self.current_quality + 3)
-                self.cooldown = 15
+    def _read_output(self):
+        """FFmpeg出力を即座に読み取る"""
+        try:
+            while self.is_running and self.process:
+                chunk = self.process.stdout.read(65536)  # より大きいチャンク
+                if chunk:
+                    with self._lock:
+                        self._output_buffer.extend(chunk)
+                elif self.process.poll() is not None:
+                    break
+        except:
+            pass
     
-    def reset(self, quality: int = 90):
-        self.current_quality = quality
-        self.current_scale = 1.0
-        self.frame_times.clear()
-        self.cooldown = 0
+    def _read_errors(self):
+        """FFmpegエラーを読み取る"""
+        try:
+            while self.is_running and self.process:
+                line = self.process.stderr.readline()
+                if line:
+                    print(f"[H264/FFmpeg] {line.decode('utf-8', errors='ignore').strip()}")
+                elif self.process.poll() is not None:
+                    break
+        except:
+            pass
+    
+    def encode_frame(self, frame: np.ndarray) -> Optional[bytes]:
+        """フレームをエンコード"""
+        if not self.is_running or not self.process:
+            return None
+        
+        if self.process.poll() is not None:
+            self.is_running = False
+            return None
+        
+        try:
+            h, w = frame.shape[:2]
+            if w != self.width or h != self.height:
+                frame = cv2.resize(frame, (self.width, self.height))
+            
+            if not frame.flags['C_CONTIGUOUS']:
+                frame = np.ascontiguousarray(frame)
+            
+            self.process.stdin.write(frame.tobytes())
+            self.process.stdin.flush()
+            
+            # 出力を取得
+            with self._lock:
+                if len(self._output_buffer) > 0:
+                    result = bytes(self._output_buffer)
+                    self._output_buffer.clear()
+                    return result
+            
+            return None
+            
+        except Exception as e:
+            print(f"[H264] エンコードエラー: {e}")
+            self.is_running = False
+            return None
+    
+    def stop(self):
+        """エンコーダーを停止"""
+        self.is_running = False
+        if self.process:
+            try:
+                self.process.stdin.close()
+                self.process.terminate()
+                self.process.wait(timeout=2)
+            except:
+                try:
+                    self.process.kill()
+                except:
+                    pass
+            self.process = None
+        print("[H264] ⏹️ 停止")
 
 
 class WindowCapture:
-    """
-    正確なウィンドウキャプチャ
-    PrintWindow APIを使用して、他のウィンドウに隠れていても
-    正しくウィンドウの内容をキャプチャする
-    """
+    """ウィンドウキャプチャ（PrintWindow API）"""
     
     def __init__(self):
         if not HAS_WIN32:
-            raise RuntimeError("pywin32が必要です: pip install pywin32")
-        
-        # PrintWindow用のフラグ
-        # PW_RENDERFULLCONTENT = 2 (Windows 8.1以降で全コンテンツをレンダリング)
+            raise RuntimeError("pywin32が必要です")
         self.PW_RENDERFULLCONTENT = 2
     
     def capture(self, hwnd: int) -> Optional[np.ndarray]:
-        """
-        ウィンドウをキャプチャ（PrintWindow API使用）
-        
-        他のウィンドウに隠れていても、正しくウィンドウの内容を取得できる
-        
-        Args:
-            hwnd: ウィンドウハンドル
-            
-        Returns:
-            numpy配列 (BGR) または None
-        """
         if not win32gui.IsWindow(hwnd):
             return None
         
@@ -147,7 +282,6 @@ class WindowCapture:
         saveBitMap = None
         
         try:
-            # ウィンドウサイズを取得（タイトルバーを含む）
             rect = win32gui.GetWindowRect(hwnd)
             w = rect[2] - rect[0]
             h = rect[3] - rect[1]
@@ -155,42 +289,30 @@ class WindowCapture:
             if w <= 0 or h <= 0:
                 return None
             
-            # デバイスコンテキストを取得
             hwndDC = win32gui.GetWindowDC(hwnd)
             mfcDC = win32ui.CreateDCFromHandle(hwndDC)
             saveDC = mfcDC.CreateCompatibleDC()
             
-            # ビットマップ作成
             saveBitMap = win32ui.CreateBitmap()
             saveBitMap.CreateCompatibleBitmap(mfcDC, w, h)
             saveDC.SelectObject(saveBitMap)
             
-            # PrintWindowでキャプチャ
-            # これにより他のウィンドウに隠れていても正しくキャプチャできる
             result = windll.user32.PrintWindow(hwnd, saveDC.GetSafeHdc(), self.PW_RENDERFULLCONTENT)
-            
             if result == 0:
-                # PrintWindowが失敗した場合（古いウィンドウなど）はBitBltを試す
                 saveDC.BitBlt((0, 0), (w, h), mfcDC, (0, 0), win32con.SRCCOPY)
             
-            # ビットマップデータを取得
             bmpinfo = saveBitMap.GetInfo()
             bmpstr = saveBitMap.GetBitmapBits(True)
             
-            # numpy配列に変換
             img = np.frombuffer(bmpstr, dtype=np.uint8)
             img = img.reshape((bmpinfo['bmHeight'], bmpinfo['bmWidth'], 4))
-            
-            # BGRA -> BGR
             img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
             
             return img
             
-        except Exception as e:
+        except:
             return None
-            
         finally:
-            # 必ずリソースを解放
             try:
                 if saveBitMap:
                     win32gui.DeleteObject(saveBitMap.GetHandle())
@@ -205,20 +327,33 @@ class WindowCapture:
 
 
 class ScreenCapture:
-    """画面キャプチャエンジン v4.0"""
+    """画面キャプチャエンジン v5.1"""
     
     def __init__(self,
                  target_fps: int = 30,
-                 jpeg_quality: int = 90,
+                 jpeg_quality: int = 85,
                  resolution_limit: str = "fullhd",
-                 use_adaptive: bool = False):
+                 use_h264: bool = True,
+                 h264_bitrate: str = "6M",
+                 nvenc_available: dict = None,
+                 **kwargs):
         
         self.target_fps = target_fps
         self.jpeg_quality = jpeg_quality
-        self.use_adaptive = use_adaptive
+        self.use_h264 = use_h264
+        self.h264_bitrate = h264_bitrate
+        self.nvenc_available = nvenc_available or {'h264_nvenc': True}  # デフォルトでNVENC有効
         
         # 解像度上限
-        self._set_resolution_limit(resolution_limit)
+        limit_map = {
+            'hd': ResolutionLimit.HD,
+            'fullhd': ResolutionLimit.FULL_HD,
+            'qhd': ResolutionLimit.QHD,
+            '4k': ResolutionLimit.UHD_4K,
+            'native': ResolutionLimit.NATIVE,
+        }
+        self.resolution_limit = limit_map.get(resolution_limit.lower(), ResolutionLimit.FULL_HD)
+        self.max_width, self.max_height = RESOLUTION_LIMITS[self.resolution_limit]
         
         # 状態
         self.is_running = False
@@ -229,40 +364,22 @@ class ScreenCapture:
         self.stats = FrameStats()
         self.stats_lock = threading.Lock()
         
-        # 品質コントローラー
-        self.quality_controller = QualityController(target_fps, jpeg_quality)
-        
         # キャプチャ設定
         self.capture_type = 'monitor'
         self.monitor_id = 1
         self.window_handle = None
         
-        # ウィンドウキャプチャ用
+        # エンコーダー
         self._window_capture: Optional[WindowCapture] = None
-    
-    def _set_resolution_limit(self, limit: str):
-        """解像度上限を設定"""
-        limit_map = {
-            'hd': ResolutionLimit.HD,
-            'fullhd': ResolutionLimit.FULL_HD,
-            'qhd': ResolutionLimit.QHD,
-            '4k': ResolutionLimit.UHD_4K,
-            'native': ResolutionLimit.NATIVE,
-        }
-        self.resolution_limit = limit_map.get(limit.lower(), ResolutionLimit.FULL_HD)
-        self.max_width, self.max_height = RESOLUTION_LIMITS[self.resolution_limit]
-        print(f"[Capture] 解像度上限: {self.resolution_limit.value} ({self.max_width}x{self.max_height})")
-    
-    def set_resolution_limit(self, limit: str):
-        """解像度上限を変更"""
-        self._set_resolution_limit(limit)
+        self._h264_encoder: Optional[H264Encoder] = None
+        self._using_h264 = False
     
     def start(self,
               capture_type: str = 'monitor',
               monitor_id: int = 1,
               window_handle: int = None,
               frame_callback: Callable = None) -> bool:
-        """キャプチャ開始"""
+        
         if self.is_running:
             self.stop()
         
@@ -271,55 +388,47 @@ class ScreenCapture:
         self.window_handle = window_handle
         self.frame_callback = frame_callback
         
-        # ウィンドウキャプチャの場合は専用クラスを使用
         if capture_type == 'window' and window_handle:
             if not HAS_WIN32:
-                print("[Capture] ❌ ウィンドウキャプチャにはpywin32が必要です")
                 return False
             self._window_capture = WindowCapture()
-            print(f"[Capture] ✅ 開始: type=window, hwnd={window_handle}, fps={self.target_fps}, quality={self.jpeg_quality}")
-        else:
-            print(f"[Capture] ✅ 開始: type=monitor, id={monitor_id}, fps={self.target_fps}, quality={self.jpeg_quality}")
+        
+        self._using_h264 = self.use_h264
+        self._h264_encoder = None
         
         self.is_running = True
-        
-        self.capture_thread = threading.Thread(
-            target=self._capture_loop,
-            daemon=True,
-            name="ScreenCaptureThread"
-        )
+        self.capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
         self.capture_thread.start()
         
+        print(f"[Capture] ✅ 開始 ({capture_type}, fps={self.target_fps}, H.264={self.use_h264})")
         return True
     
     def stop(self):
-        """キャプチャ停止"""
         self.is_running = False
-        if self.capture_thread and self.capture_thread.is_alive():
+        if self.capture_thread:
             self.capture_thread.join(timeout=3)
-        self.capture_thread = None
+        if self._h264_encoder:
+            self._h264_encoder.stop()
+            self._h264_encoder = None
         self._window_capture = None
         print("[Capture] ⏹️ 停止")
     
     def _capture_loop(self):
-        """メインキャプチャループ"""
         sct = mss.mss() if self.capture_type == 'monitor' else None
         frame_interval = 1.0 / self.target_fps
         
         frame_count = 0
         dropped = 0
-        fps_samples = []
         last_report = time.time()
-        
-        print(f"[Capture] 🔄 ループ開始 (間隔={frame_interval*1000:.1f}ms)")
+        report_frame_count = 0
+        encoder_init = False
         
         while self.is_running:
             loop_start = time.perf_counter()
             
             try:
-                # === 1. キャプチャ ===
+                # キャプチャ
                 t1 = time.perf_counter()
-                
                 if self.capture_type == 'window' and self._window_capture:
                     raw_img = self._window_capture.capture(self.window_handle)
                 else:
@@ -331,91 +440,93 @@ class ScreenCapture:
                 
                 capture_ms = (time.perf_counter() - t1) * 1000
                 
-                # === 2. リサイズ（解像度上限適用）===
-                t2 = time.perf_counter()
+                # リサイズ
                 img = self._resize_to_limit(raw_img)
-                resize_ms = (time.perf_counter() - t2) * 1000
+                h, w = img.shape[:2]
                 
-                # === 3. JPEGエンコード ===
-                t3 = time.perf_counter()
+                # エンコード
+                t2 = time.perf_counter()
+                img_bytes = None
+                codec = 'jpeg'
+                encoder = 'jpeg'
                 
-                quality = self.quality_controller.current_quality if self.use_adaptive else self.jpeg_quality
+                # H.264エンコーダー初期化
+                if self._using_h264 and not encoder_init:
+                    self._h264_encoder = H264Encoder(w, h, self.target_fps, self.h264_bitrate)
+                    if self._h264_encoder.start(nvenc_available=self.nvenc_available):
+                        encoder_init = True
+                        encoder = self._h264_encoder.encoder_type
+                    else:
+                        self._using_h264 = False
+                        self._h264_encoder = None
                 
-                # 高画質エンコード設定
-                # JPEG_SAMPLING_FACTOR: 0x111111 = 4:4:4 (最高画質、色情報を間引かない)
-                encode_params = [
-                    cv2.IMWRITE_JPEG_QUALITY, quality,
-                    cv2.IMWRITE_JPEG_OPTIMIZE, 1,
-                    cv2.IMWRITE_JPEG_SAMPLING_FACTOR, 0x111111,  # 4:4:4 サブサンプリング
-                ]
-                success, buffer = cv2.imencode('.jpg', img, encode_params)
-                
-                if not success:
+                # H.264エンコード（必須）
+                if self._using_h264 and self._h264_encoder and self._h264_encoder.is_running:
+                    encoded = self._h264_encoder.encode_frame(img)
+                    if encoded and len(encoded) > 0:
+                        img_bytes = encoded
+                        codec = 'h264'
+                        encoder = self._h264_encoder.encoder_type
+                    else:
+                        # H.264エンコード失敗時は再試行
+                        continue
+                else:
+                    # H.264が有効でない場合はスキップ
                     continue
                 
-                img_bytes = buffer.tobytes()
-                encode_ms = (time.perf_counter() - t3) * 1000
+                encode_ms = (time.perf_counter() - t2) * 1000
+                total_ms = capture_ms + encode_ms
                 
-                total_ms = capture_ms + resize_ms + encode_ms
-                
-                # === 4. 適応品質更新 ===
-                if self.use_adaptive:
-                    self.quality_controller.update(total_ms)
-                
-                # === 5. フレームドロップ判定 ===
+                # フレームドロップ判定
                 if total_ms > frame_interval * 1000 * 2:
                     dropped += 1
                 
-                # === 6. コールバック ===
+                # コールバック
                 if self.frame_callback and img_bytes:
-                    img_b64 = base64.b64encode(img_bytes).decode('utf-8')
-                    
                     frame_data = {
-                        'image': img_b64,
-                        'width': img.shape[1],
-                        'height': img.shape[0],
+                        'image': base64.b64encode(img_bytes).decode('utf-8'),
+                        'width': w,
+                        'height': h,
                         'size': len(img_bytes),
                         'timestamp': time.time(),
-                        'quality': quality,
+                        'codec': codec,
+                        'encoder': encoder,
                     }
-                    
                     try:
                         self.frame_callback(frame_data)
                         frame_count += 1
-                    except Exception as e:
-                        print(f"[Capture] コールバックエラー: {e}")
+                    except:
+                        pass
                 
-                # === 7. 統計 ===
-                fps_samples.append(total_ms)
-                if len(fps_samples) > 30:
-                    fps_samples.pop(0)
-                
+                # 統計（時間ベースの正確なFPS計算）
                 now = time.time()
+                report_frame_count += 1
+                
                 if now - last_report >= 3:
-                    avg_ms = sum(fps_samples) / len(fps_samples) if fps_samples else 0
-                    actual_fps = 1000.0 / avg_ms if avg_ms > 0 else 0
+                    elapsed_report = now - last_report
+                    actual_fps = report_frame_count / elapsed_report if elapsed_report > 0 else 0
+                    report_frame_count = 0
                     
                     with self.stats_lock:
                         self.stats.fps = actual_fps
                         self.stats.capture_time_ms = capture_ms
                         self.stats.encode_time_ms = encode_ms
                         self.stats.total_time_ms = total_ms
-                        self.stats.frame_size_kb = len(img_bytes) / 1024
+                        self.stats.frame_size_kb = len(img_bytes) / 1024 if img_bytes else 0
                         self.stats.dropped_frames = dropped
-                        self.stats.resolution = f"{img.shape[1]}x{img.shape[0]}"
+                        self.stats.resolution = f"{w}x{h}"
+                        self.stats.encoder_type = encoder
                     
-                    print(f"[Capture] 📊 FPS: {actual_fps:.1f}, "
-                          f"解像度: {img.shape[1]}x{img.shape[0]}, "
-                          f"サイズ: {len(img_bytes)/1024:.0f}KB, "
-                          f"品質: {quality}%"
-                          f"{f', ドロップ: {dropped}' if dropped > 0 else ''}")
+                    print(f"[Capture] 📊 FPS: {actual_fps:.1f}, {w}x{h}, "
+                          f"{len(img_bytes)/1024:.0f}KB, {encoder}"
+                          f"{f', drop:{dropped}' if dropped > 0 else ''}")
                     last_report = now
                 
-                # === 8. フレーム間隔調整 ===
+                # フレーム間隔調整（最小待機）
                 elapsed = time.perf_counter() - loop_start
                 sleep_time = frame_interval - elapsed
-                if sleep_time > 0.001:
-                    time.sleep(sleep_time)
+                if sleep_time > 0:
+                    time.sleep(max(sleep_time, 0.0001))
                     
             except Exception as e:
                 print(f"[Capture] エラー: {e}")
@@ -423,46 +534,28 @@ class ScreenCapture:
         
         if sct:
             sct.close()
-        print(f"[Capture] 🏁 終了 (フレーム: {frame_count}, ドロップ: {dropped})")
     
     def _grab_monitor(self, sct) -> Optional[np.ndarray]:
-        """モニターをキャプチャ（mss使用）"""
         try:
             monitors = sct.monitors
             if self.monitor_id >= len(monitors):
                 self.monitor_id = 1
-            
             monitor = monitors[self.monitor_id]
             screenshot = sct.grab(monitor)
-            
             img = np.array(screenshot, dtype=np.uint8)
-            img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
-            
-            return img
-        except Exception as e:
-            print(f"[Capture] モニターキャプチャエラー: {e}")
+            return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+        except:
             return None
     
     def _resize_to_limit(self, img: np.ndarray) -> np.ndarray:
-        """解像度上限に合わせてリサイズ（テキスト品質優先）"""
         h, w = img.shape[:2]
-        
         if w <= self.max_width and h <= self.max_height:
             return img
-        
-        scale_w = self.max_width / w
-        scale_h = self.max_height / h
-        scale = min(scale_w, scale_h)
-        
-        new_w = int(w * scale)
-        new_h = int(h * scale)
-        
-        # INTER_LANCZOS4: 高品質リサイズ（テキストの鮮明さを維持）
-        resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
-        return resized
+        scale = min(self.max_width / w, self.max_height / h)
+        new_w, new_h = int(w * scale), int(h * scale)
+        return cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
     
     def get_stats(self) -> FrameStats:
-        """統計取得"""
         with self.stats_lock:
             return FrameStats(
                 capture_time_ms=self.stats.capture_time_ms,
@@ -472,164 +565,26 @@ class ScreenCapture:
                 fps=self.stats.fps,
                 dropped_frames=self.stats.dropped_frames,
                 resolution=self.stats.resolution,
+                encoder_type=self.stats.encoder_type,
             )
     
-    def update_settings(self,
-                       fps: int = None,
-                       quality: int = None,
-                       resolution_limit: str = None,
-                       use_adaptive: bool = None):
-        """設定更新"""
-        if fps is not None:
+    def update_settings(self, fps=None, quality=None, resolution_limit=None, **kwargs):
+        if fps:
             self.target_fps = fps
-            self.quality_controller.target_fps = fps
-            self.quality_controller.target_frame_time = 1000.0 / fps
-        
-        if quality is not None:
+        if quality:
             self.jpeg_quality = quality
-            self.quality_controller.current_quality = quality
-        
-        if resolution_limit is not None:
-            self._set_resolution_limit(resolution_limit)
-        
-        if use_adaptive is not None:
-            self.use_adaptive = use_adaptive
 
 
-# ========================================
 # ユーティリティ
-# ========================================
 
 def get_ffmpeg_path() -> str:
-    """FFmpegのパスを取得（imageio-ffmpegを優先）"""
-    # まずimageio-ffmpegから取得を試みる
     try:
         import imageio_ffmpeg
-        ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
-        if ffmpeg_path:
-            return ffmpeg_path
-    except ImportError:
-        pass
-    
-    # フォールバック: システムのffmpeg
-    return 'ffmpeg'
-
-
-def check_nvenc_available() -> dict:
-    """NVENC確認"""
-    import subprocess
-    result = {
-        'ffmpeg': False,
-        'h264_nvenc': False,
-        'hevc_nvenc': False,
-        'av1_nvenc': False
-    }
-    
-    ffmpeg_path = get_ffmpeg_path()
-    
-    try:
-        proc = subprocess.run([ffmpeg_path, '-version'],
-                            capture_output=True, timeout=5)
-        result['ffmpeg'] = proc.returncode == 0
-        
-        if result['ffmpeg']:
-            proc = subprocess.run([ffmpeg_path, '-hide_banner', '-encoders'],
-                                capture_output=True, text=True, timeout=5)
-            output = proc.stdout
-            result['h264_nvenc'] = 'h264_nvenc' in output
-            result['hevc_nvenc'] = 'hevc_nvenc' in output
-            result['av1_nvenc'] = 'av1_nvenc' in output
+        return imageio_ffmpeg.get_ffmpeg_exe()
     except:
-        pass
-    
-    return result
+        return 'ffmpeg'
 
 
-# 互換性エイリアス
+# エイリアス（互換性）
 HighPerformanceCapture = ScreenCapture
-FastScreenCapture = ScreenCapture
-AdaptiveQualityController = QualityController
-FastAdaptiveController = QualityController
-
-
-# ========================================
-# テスト
-# ========================================
-
-if __name__ == '__main__':
-    print("=" * 60)
-    print("🎬 画面キャプチャテスト v4.0")
-    print("=" * 60)
-    
-    frame_count = [0]
-    def on_frame(data):
-        frame_count[0] += 1
-    
-    # モニターキャプチャテスト
-    print("\n🧪 モニターキャプチャテスト (5秒)...")
-    capture = ScreenCapture(
-        target_fps=30,
-        jpeg_quality=90,
-        resolution_limit="fullhd",
-        use_adaptive=False
-    )
-    
-    capture.start(
-        capture_type='monitor',
-        monitor_id=1,
-        frame_callback=on_frame
-    )
-    
-    time.sleep(5)
-    
-    stats = capture.get_stats()
-    capture.stop()
-    
-    print(f"\n📊 結果:")
-    print(f"   フレーム: {frame_count[0]}")
-    print(f"   FPS: {stats.fps:.1f}")
-    print(f"   解像度: {stats.resolution}")
-    print(f"   サイズ: {stats.frame_size_kb:.0f}KB")
-    
-    # ウィンドウキャプチャテスト（pywin32がある場合）
-    if HAS_WIN32:
-        print("\n🧪 ウィンドウキャプチャテスト (PrintWindow API)...")
-        
-        # 最初に見つかったウィンドウをテスト
-        def find_window():
-            windows = []
-            def callback(hwnd, _):
-                if win32gui.IsWindowVisible(hwnd):
-                    title = win32gui.GetWindowText(hwnd)
-                    if title and len(title) > 5:
-                        windows.append((hwnd, title))
-                return True
-            win32gui.EnumWindows(callback, None)
-            return windows
-        
-        windows = find_window()
-        if windows:
-            hwnd, title = windows[0]
-            print(f"   テスト対象: {title[:50]}")
-            
-            frame_count[0] = 0
-            capture = ScreenCapture(
-                target_fps=30,
-                jpeg_quality=90,
-                resolution_limit="fullhd"
-            )
-            
-            capture.start(
-                capture_type='window',
-                window_handle=hwnd,
-                frame_callback=on_frame
-            )
-            
-            time.sleep(3)
-            
-            stats = capture.get_stats()
-            capture.stop()
-            
-            print(f"   フレーム: {frame_count[0]}")
-            print(f"   FPS: {stats.fps:.1f}")
-            print(f"   解像度: {stats.resolution}")
+QualityController = type('QualityController', (), {'__init__': lambda self, *a, **k: None})

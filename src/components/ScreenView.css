@@ -91,7 +91,8 @@
 .fps-indicator,
 .resolution-indicator,
 .size-indicator,
-.source-indicator {
+.source-indicator,
+.codec-indicator {
   background: rgba(0, 0, 0, 0.8);
   backdrop-filter: blur(10px);
   padding: 6px 12px;
@@ -119,8 +120,23 @@
   border-color: rgba(255, 152, 0, 0.3);
 }
 
+.codec-indicator {
+  color: #9c27b0;
+  border-color: rgba(156, 39, 176, 0.3);
+}
+
+.codec-indicator.h264 {
+  color: #4caf50;
+  border-color: rgba(76, 175, 80, 0.3);
+}
+
 .source-indicator {
   color: #fff;
+}
+
+/* 非表示 */
+.hidden {
+  display: none !important;
 }
 
 /* フルスクリーンモード */

@@ -31,7 +31,6 @@ import numpy as np
 from hw_encoder import (
     ScreenCapture,
     QualityController,
-    check_nvenc_available,
     FrameStats
 )
 
@@ -135,21 +134,27 @@ selected_window_title = None
 TARGET_FPS = 60
 JPEG_QUALITY = 95
 RESOLUTION_LIMIT = 'fullhd'  # 'hd', 'fullhd', '4k'
-USE_ADAPTIVE = False
+USE_H264 = True  # H.264必須（JPEGは使用しない）
+H264_BITRATE = '35M'  # H.264ビットレート（高画質、ノイズ低減）
 
-# プリセット（高画質維持、差分検出で帯域節約）
+# プリセット - 高画質、安定性優先
 QUALITY_PRESETS = {
-    'hd60': {'quality': 95, 'resolution': 'fullhd', 'fps': 60},   # Full HD 60fps
-    '4k30': {'quality': 95, 'resolution': '4k', 'fps': 30},       # 4K 30fps
-    '4k60': {'quality': 92, 'resolution': '4k', 'fps': 60},       # 4K 60fps
+    'hd60': {'fps': 60, 'resolution': 'fullhd', 'h264': True, 'bitrate': H264_BITRATE, 'quality': 100},
+    '4k30': {'fps': 30, 'resolution': '4k', 'h264': True, 'bitrate': H264_BITRATE, 'quality': 100},
 }
 
-# NVENCステータス
-nvenc_status = check_nvenc_available()
+# NVENCステータス（デフォルト値で十分）
+nvenc_status = {'ffmpeg': True, 'h264_nvenc': True, 'hevc_nvenc': False, 'av1_nvenc': False}
 
 # キャッシュ
 monitors_info = []
 windows_info = []
+
+# ソース初期化（バックグラウンド）
+def _init_sources():
+    get_monitors()
+    get_windows()
+    print(f"✅ ソース初期化完了")
 
 
 def get_windows():
@@ -325,35 +330,50 @@ def generate_thumbnails():
     return sources
 
 
+# ソース初期化スレッド起動（関数定義後）
+threading.Thread(target=_init_sources, daemon=True).start()
+
+
 def start_capture_pipeline():
     """高性能キャプチャパイプラインを開始"""
     global capture_pipeline, is_sharing, capture_type, selected_monitor, selected_window_handle
     
     # 既存のパイプラインがあれば確実に停止
     if capture_pipeline:
-        print("[Pipeline] ⚠️ 既存のパイプラインを停止中...")
         capture_pipeline.stop()
         capture_pipeline = None
-        time.sleep(0.05)  # 短い待機
+        time.sleep(0.05)
     
     target = selected_window_title if capture_type == 'window' else f"ディスプレイ {selected_monitor}"
     print(f"[Pipeline] 🚀 開始: {target}")
-    print(f"           FPS: {TARGET_FPS}, 品質: {JPEG_QUALITY}%, 解像度上限: {RESOLUTION_LIMIT}")
-    print(f"           適応品質: {'有効' if USE_ADAPTIVE else '無効'}")
+    print(f"           FPS: {TARGET_FPS}, H.264: {USE_H264}, bitrate: {H264_BITRATE}")
     
     def on_frame(frame_data):
-        """フレーム受信コールバック"""
+        """フレーム受信コールバック - H.264のみ"""
         try:
+            # デバッグ: 最初のフレームだけコーデック情報をログ
+            if not hasattr(on_frame, '_logged'):
+                codec = frame_data.get('codec', 'unknown')
+                encoder = frame_data.get('encoder', 'unknown')
+                # H.264以外の場合は警告
+                if codec != 'h264':
+                    print(f"⚠️ [Frame] H.264以外で送信されています: {codec}, {encoder}")
+                else:
+                    print(f"✅ [Frame] 📹 H.264, エンコーダー: {encoder}")
+                on_frame._logged = True
             socketio.emit('frame', frame_data)
         except Exception as e:
+            print(f"[Frame] エラー: {e}")
             pass
     
-    # パイプライン作成 (v3.0)
+    # パイプライン作成
     capture_pipeline = ScreenCapture(
         target_fps=TARGET_FPS,
         jpeg_quality=JPEG_QUALITY,
         resolution_limit=RESOLUTION_LIMIT,
-        use_adaptive=USE_ADAPTIVE
+        use_h264=USE_H264,
+        h264_bitrate=H264_BITRATE,
+        nvenc_available=nvenc_status
     )
     
     # 開始
@@ -377,11 +397,8 @@ def start_capture_pipeline():
                     socketio.emit('stats', {
                         'fps': round(stats.fps, 1),
                         'frameSize': int(stats.frame_size_kb * 1024),
-                        'captureTime': round(stats.capture_time_ms, 1),
-                        'encodeTime': round(stats.encode_time_ms, 1),
-                        'totalTime': round(stats.total_time_ms, 1),
                         'resolution': stats.resolution,
-                        'droppedFrames': stats.dropped_frames
+                        'encoder': stats.encoder_type
                     })
             except:
                 pass
@@ -449,6 +466,8 @@ def handle_connect():
         'is_sharing': is_sharing,
         'current_sharer': current_sharer_id,
         'is_host': is_host,
+        'codec': 'h264' if USE_H264 else 'jpeg',
+        'encoder': 'h264_nvenc' if nvenc_status.get('h264_nvenc') else 'libx264' if USE_H264 else 'jpeg',
         'features': {
             'adaptive_quality': True,
             'multi_threaded': True,
@@ -535,8 +554,8 @@ def handle_select_source(data):
 @socketio.on('start_sharing')
 def handle_start_sharing(data=None):
     """画面共有開始（誰でも可能、他の人の共有を強制解除）"""
-    global is_sharing, capture_pipeline, TARGET_FPS, JPEG_QUALITY, RESOLUTION_LIMIT, USE_ADAPTIVE
-    global current_sharer_id, is_audio_sharing, audio_thread
+    global is_sharing, capture_pipeline, TARGET_FPS, JPEG_QUALITY, RESOLUTION_LIMIT
+    global current_sharer_id, is_audio_sharing, audio_thread, USE_H264, H264_BITRATE
     
     # 既に共有中の場合（自分自身も含む）、必ず先に停止
     if is_sharing:
@@ -577,7 +596,8 @@ def handle_start_sharing(data=None):
                 JPEG_QUALITY = settings['quality']
                 RESOLUTION_LIMIT = settings['resolution']
                 TARGET_FPS = settings['fps']
-                USE_ADAPTIVE = False
+                USE_H264 = settings.get('h264', True)
+                H264_BITRATE = settings.get('bitrate', '20M')
         
         if 'source' in data:
             handle_select_source(data['source'])
@@ -597,7 +617,7 @@ def handle_start_sharing(data=None):
     start_capture_pipeline()
 
     target = selected_window_title if capture_type == 'window' else f'ディスプレイ {selected_monitor}'
-    print(f"[共有] 📹 開始: {target} @ {TARGET_FPS}fps, 解像度: {RESOLUTION_LIMIT}")
+    print(f"[共有] 📹 開始: {target} @ {TARGET_FPS}fps, H.264: {USE_H264}")
     
     socketio.emit('sharing_started', {
         'message': '画面共有を開始しました',
@@ -606,7 +626,8 @@ def handle_start_sharing(data=None):
         'settings': {
             'fps': TARGET_FPS,
             'quality': JPEG_QUALITY,
-            'resolution_limit': RESOLUTION_LIMIT
+            'resolution_limit': RESOLUTION_LIMIT,
+            'codec': 'h264' if USE_H264 else 'jpeg'
         }
     })
 
@@ -649,7 +670,7 @@ def stop_sharing():
 @socketio.on('change_settings')
 def handle_change_settings(data):
     """設定変更（共有者のみ）"""
-    global TARGET_FPS, JPEG_QUALITY, RESOLUTION_LIMIT, USE_ADAPTIVE, capture_pipeline
+    global TARGET_FPS, JPEG_QUALITY, RESOLUTION_LIMIT, capture_pipeline, USE_H264, H264_BITRATE
     
     # 共有者でない場合は拒否
     if request.sid != current_sharer_id:
@@ -662,22 +683,23 @@ def handle_change_settings(data):
             JPEG_QUALITY = settings['quality']
             RESOLUTION_LIMIT = settings['resolution']
             TARGET_FPS = settings['fps']
-            USE_ADAPTIVE = False
-            print(f"[設定] プリセット '{preset}' を適用 ({RESOLUTION_LIMIT}, {TARGET_FPS}fps)")
+            USE_H264 = settings.get('h264', True)
+            H264_BITRATE = settings.get('bitrate', '20M')
+            print(f"[設定] プリセット '{preset}' を適用 ({RESOLUTION_LIMIT}, {TARGET_FPS}fps, H.264: {USE_H264})")
             
             # パイプラインの設定を更新
             if capture_pipeline:
                 capture_pipeline.update_settings(
                     fps=TARGET_FPS,
                     quality=JPEG_QUALITY,
-                    resolution_limit=RESOLUTION_LIMIT,
-                    use_adaptive=USE_ADAPTIVE
+                    resolution_limit=RESOLUTION_LIMIT
                 )
     
     socketio.emit('settings_changed', {
         'fps': TARGET_FPS,
         'quality': JPEG_QUALITY,
-        'resolution_limit': RESOLUTION_LIMIT
+        'resolution_limit': RESOLUTION_LIMIT,
+        'codec': 'h264' if USE_H264 else 'jpeg'
     })
 
 
@@ -925,7 +947,7 @@ def handle_stop_audio():
 
 if __name__ == '__main__':
     print("=" * 70)
-    print("🖥️  ローカルネット画面共有サーバー v4.0 (高性能版)")
+    print("🖥️  ローカルネット画面共有サーバー v5.0 (H.264対応版)")
     print("=" * 70)
     print()
     
@@ -938,6 +960,7 @@ if __name__ == '__main__':
     print(f"   FFmpeg: {'✅' if nvenc_status['ffmpeg'] else '❌'}")
     print(f"   H.264 NVENC: {'✅' if nvenc_status['h264_nvenc'] else '❌'}")
     print(f"   HEVC NVENC: {'✅' if nvenc_status['hevc_nvenc'] else '❌'}")
+    print(f"   H.264モード: {'有効' if USE_H264 else '無効 (JPEG)'}")
     print()
     
     # モニター検出

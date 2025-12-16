@@ -19,6 +19,10 @@ function App() {
   const [frameInfo, setFrameInfo] = useState({ width: 0, height: 0, size: 0 })
   const [isFullscreen, setIsFullscreen] = useState(false)
   
+  // コーデック・エンコーダー情報
+  const [codec, setCodec] = useState('jpeg')  // 'jpeg' or 'h264'
+  const [encoder, setEncoder] = useState('')  // 'h264_nvenc', 'libx264', 'jpeg'
+  
   // ソース選択
   const [showSourcePicker, setShowSourcePicker] = useState(false)
   const [sources, setSources] = useState([])
@@ -89,6 +93,13 @@ function App() {
       currentSharerIdRef.current = data.current_sharer  // refも更新
       setAudioAvailable(data.audio_available || false)
       setIsHost(data.is_host || false)
+      // サーバー側のコーディック設定を同期
+      if (data.codec) {
+        setCodec(data.codec)
+      }
+      if (data.encoder) {
+        setEncoder(data.encoder)
+      }
       if (data.is_sharing) {
         setIsSharing(true)
       }
@@ -110,8 +121,12 @@ function App() {
     })
 
     newSocket.on('frame', (data) => {
-      // 直接Data URLを設定（最速）
-      setCurrentFrame(`data:image/jpeg;base64,${data.image}`)
+      // H.264データを処理
+      setCodec('h264')
+      if (data.encoder) {
+        setEncoder(data.encoder)
+      }
+      setCurrentFrame(data)
       
       // frameInfoはrefで管理し、UIには遅延更新
       frameInfoRef.current = {
@@ -146,12 +161,16 @@ function App() {
       setCurrentSharerId(data.sharer_id)
       currentSharerIdRef.current = data.sharer_id  // refも更新
       setCurrentFrame(null)  // 前のフレームをクリア
+      // コーデック設定
+      if (data.settings?.codec) {
+        setCodec(data.settings.codec)
+      }
       // 音声同期をリセット
       nextPlayTimeRef.current = 0
       audioInitializedRef.current = false
       audioSyncRef.current.consecutiveDelays = 0
       audioSyncRef.current.lastResetTime = 0
-      addMessage(`共有開始: ${data.target || ''}`, 'success')
+      addMessage(`共有開始: ${data.target || ''} (${data.settings?.codec === 'h264' ? 'H.264' : 'JPEG'})`, 'success')
     })
 
     newSocket.on('sharing_stopped', (data) => {
@@ -159,6 +178,7 @@ function App() {
       setCurrentFrame(null)
       setCurrentSharerId(null)
       currentSharerIdRef.current = null  // refもリセット
+      setCodec('jpeg')  // コーデックリセット
       // 音声同期をリセット
       nextPlayTimeRef.current = 0
       audioInitializedRef.current = false
@@ -524,6 +544,8 @@ function App() {
             isAudioEnabled={isAudioEnabled}
             onToggleAudio={toggleAudio}
             audioAvailable={audioAvailable}
+            codec={codec}
+            encoder={encoder}
           />
         )}
       </div>

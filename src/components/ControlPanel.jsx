@@ -1,4 +1,4 @@
-import { Play, Square, Users, Activity, MessageSquare, Monitor, Maximize, Volume2, VolumeX } from 'lucide-react'
+import { Play, Square, Users, Activity, MessageSquare, Monitor, Maximize, Volume2, VolumeX, Cpu } from 'lucide-react'
 import './ControlPanel.css'
 
 function ControlPanel({ 
@@ -18,13 +18,14 @@ function ControlPanel({
   onToggleFullscreen,
   isAudioEnabled,
   onToggleAudio,
-  audioAvailable
+  audioAvailable,
+  codec,
+  encoder
 }) {
-  // シンプルな3つのオプション
+  // 品質プリセット（サーバーの設定と同期）
   const qualityOptions = [
-    { id: 'hd60', label: 'HD 60fps', desc: '1920x1080 / 60fps' },
-    { id: '4k30', label: '4K 30fps', desc: '3840x2160 / 30fps' },
-    { id: '4k60', label: '4K 60fps', desc: '3840x2160 / 60fps' },
+    { id: 'hd60', label: 'HD 60fps', desc: 'Full HD / 低負荷' },
+    { id: '4k30', label: '4K 30fps', desc: '高解像度 / 安定' },
   ]
 
   return (
@@ -147,6 +148,20 @@ function ControlPanel({
             <span className="stat-label">サイズ</span>
             <span className="stat-value">{(frameInfo.size / 1024).toFixed(0)}KB</span>
           </div>
+          <div className="stat-item">
+            <span className="stat-label"><Cpu size={12} /> コーデック</span>
+            <span className={`stat-value ${codec === 'h264' ? 'codec-h264' : ''}`}>
+              {codec === 'h264' ? 'H.264' : 'JPEG'}
+            </span>
+          </div>
+          {encoder && (
+            <div className="stat-item">
+              <span className="stat-label">エンコーダー</span>
+              <span className={`stat-value ${encoder?.includes('nvenc') ? 'encoder-nvenc' : ''}`}>
+                {encoder?.includes('nvenc') ? 'NVENC' : encoder || '-'}
+              </span>
+            </div>
+          )}
         </div>
       </div>
 
